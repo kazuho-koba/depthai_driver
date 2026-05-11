@@ -137,7 +137,8 @@ class OakdStereoImuNode(Node):
                         packet.gyroscope.getTimestamp())
                 else:
                     # Fallback only. This is not recommended for VIO.
-                    stamp = self.get_clock().now().to_msg()
+                    # stamp = self.get_clock().now().to_msg()
+                    pass
 
                 msg.header.stamp = stamp
                 msg.header.frame_id = "imu0"
