@@ -28,19 +28,19 @@ class OakdStereoImuNode(Node):
         mono_left.setBoardSocket(dai.CameraBoardSocket.LEFT)
         mono_left.setResolution(
             dai.MonoCameraProperties.SensorResolution.THE_400_P)
-        mono_left.setFps(30)
+        mono_left.setFps(20)
 
         # Right mono camera
         mono_right = self.pipeline.create(dai.node.MonoCamera)
         mono_right.setBoardSocket(dai.CameraBoardSocket.RIGHT)
         mono_right.setResolution(
             dai.MonoCameraProperties.SensorResolution.THE_400_P)
-        mono_right.setFps(30)
+        mono_right.setFps(20)
 
         # IMU
         imu = self.pipeline.create(dai.node.IMU)
-        imu.enableIMUSensor(dai.IMUSensor.ACCELEROMETER_RAW, 200)
-        imu.enableIMUSensor(dai.IMUSensor.GYROSCOPE_RAW, 200)
+        imu.enableIMUSensor(dai.IMUSensor.ACCELEROMETER_RAW, 100)
+        imu.enableIMUSensor(dai.IMUSensor.GYROSCOPE_RAW, 100)
         imu.setBatchReportThreshold(1)
         imu.setMaxBatchReports(10)
 
