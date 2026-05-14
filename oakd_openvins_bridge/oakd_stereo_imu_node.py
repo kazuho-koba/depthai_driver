@@ -17,6 +17,9 @@ class OakdStereoImuNode(Node):
 
         self.bridge = CvBridge()
 
+        self.latest_left = None
+        self.latest_right = None
+
         self.pub_left = self.create_publisher(Image, "/cam0/image_raw", 10)
         self.pub_right = self.create_publisher(Image, "/cam1/image_raw", 10)
         self.pub_imu = self.create_publisher(Imu, "/imu0", 200)
@@ -26,23 +29,23 @@ class OakdStereoImuNode(Node):
         # Left mono camera
         mono_left = self.pipeline.create(dai.node.MonoCamera)
         mono_left.setBoardSocket(dai.CameraBoardSocket.LEFT)
-        mono_left.setResolution(
-            dai.MonoCameraProperties.SensorResolution.THE_400_P)
+        mono_left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
         mono_left.setFps(20)
 
         # Right mono camera
         mono_right = self.pipeline.create(dai.node.MonoCamera)
         mono_right.setBoardSocket(dai.CameraBoardSocket.RIGHT)
-        mono_right.setResolution(
-            dai.MonoCameraProperties.SensorResolution.THE_400_P)
+        mono_right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
         mono_right.setFps(20)
 
         # IMU
         imu = self.pipeline.create(dai.node.IMU)
-        imu.enableIMUSensor(dai.IMUSensor.ACCELEROMETER_RAW, 100)
-        imu.enableIMUSensor(dai.IMUSensor.GYROSCOPE_RAW, 100)
+        # imu.enableIMUSensor(dai.IMUSensor.ACCELEROMETER_RAW, 100)
+        # imu.enableIMUSensor(dai.IMUSensor.GYROSCOPE_RAW, 100)
+        imu.enableIMUSensor(dai.IMUSensor.ACCELEROMETER, 125)
+        imu.enableIMUSensor(dai.IMUSensor.GYROSCOPE_CALIBRATED, 125)
         imu.setBatchReportThreshold(1)
-        imu.setMaxBatchReports(10)
+        imu.setMaxBatchReports(1)
 
         # XLink outputs
         xout_left = self.pipeline.createXLinkOut()
@@ -59,12 +62,9 @@ class OakdStereoImuNode(Node):
 
         self.device = dai.Device(self.pipeline)
 
-        self.q_left = self.device.getOutputQueue(
-            "left", maxSize=4, blocking=False)
-        self.q_right = self.device.getOutputQueue(
-            "right", maxSize=4, blocking=False)
-        self.q_imu = self.device.getOutputQueue(
-            "imu", maxSize=50, blocking=False)
+        self.q_left = self.device.getOutputQueue("left", maxSize=10, blocking=False)
+        self.q_right = self.device.getOutputQueue("right", maxSize=10, blocking=False)
+        self.q_imu = self.device.getOutputQueue("imu", maxSize=50, blocking=False)
 
         self.timer = self.create_timer(0.001, self.poll)
 
@@ -102,19 +102,31 @@ class OakdStereoImuNode(Node):
         left = self.q_left.tryGet()
         right = self.q_right.tryGet()
 
-        if left is not None and right is not None:
+        if left is not None:
+            self.latest_left = left
+
+        if right is not None:
+            self.latest_right = right
+
+        if self.latest_left is not None and self.latest_right is not None:
+            left_msg_dai = self.latest_left
+            right_msg_dai = self.latest_right
+
+            # clear buffer after making one pair
+            self.latest_left = None
+            self.latest_right = None
+
             # Use DepthAI timestamp from one image.
             # Since left/right are captured by the stereo pair, we publish them with the same stamp.
-            stamp = self.dai_time_to_ros_msg(left.getTimestamp())
+            stamp = self.dai_time_to_ros_msg(left_msg_dai.getTimestamp())
+            left_frame = left_msg_dai.getCvFrame()
+            right_frame = right_msg_dai.getCvFrame()
 
-            left_frame = left.getCvFrame()
             left_msg = self.bridge.cv2_to_imgmsg(left_frame, encoding="mono8")
             left_msg.header.stamp = stamp
             left_msg.header.frame_id = "cam0"
 
-            right_frame = right.getCvFrame()
-            right_msg = self.bridge.cv2_to_imgmsg(
-                right_frame, encoding="mono8")
+            right_msg = self.bridge.cv2_to_imgmsg(right_frame, encoding="mono8")
             right_msg.header.stamp = stamp
             right_msg.header.frame_id = "cam1"
 
@@ -127,18 +139,19 @@ class OakdStereoImuNode(Node):
             for packet in imu_packets.packets:
                 msg = Imu()
 
-                # Prefer DepthAI IMU packet timestamp if available.
-                # Depending on depthai version, timestamp may be on acceleroMeter / gyroscope report.
+                # Prefer DepthAI device timestamp.
+                # Use accelerometer timestamp as representative timestamp
+                # for the combined accel+gyro IMU message.
                 if hasattr(packet.acceleroMeter, "getTimestamp"):
                     stamp = self.dai_time_to_ros_msg(
-                        packet.acceleroMeter.getTimestamp())
+                        packet.acceleroMeter.getTimestamp()
+                    )
                 elif hasattr(packet.gyroscope, "getTimestamp"):
                     stamp = self.dai_time_to_ros_msg(
-                        packet.gyroscope.getTimestamp())
+                        packet.gyroscope.getTimestamp()
+                    )
                 else:
-                    # Fallback only. This is not recommended for VIO.
-                    # stamp = self.get_clock().now().to_msg()
-                    pass
+                    continue
 
                 msg.header.stamp = stamp
                 msg.header.frame_id = "imu0"
