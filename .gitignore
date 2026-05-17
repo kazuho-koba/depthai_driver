@@ -1,2 +1,11 @@
 datasets/oakd_calib/kalibr_targets/apriltag-imgs/
 datasets/oakd_calib/bags
+# Large calibration bags
+*.bag
+*.db3
+*.db3-wal
+*.db3-shm
+datasets/oakd_calib/**/*.bag
+datasets/oakd_calib/**/*.db3
+datasets/oakd_calib/**/*.db3-wal
+datasets/oakd_calib/**/*.db3-shm

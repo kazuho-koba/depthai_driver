@@ -1,0 +1,38 @@
+root@kazuho-host:/workspaces/ros2_ws/src/oakd_openvins_bridge/tools/oak_openvins# python3 read_oak_calib2.py 
+MX ID: 19443010C10EF91200
+Board name: DM9098
+Board rev: R3M2E3
+root@kazuho-host:/workspaces/ros2_ws/src/oakd_openvins_bridge/tools/oak_openvins# python3 read_oak_calib.py 
+EEPROM data:
+<depthai.EepromData object at 0x7022444d7ab0>
+
+RGB_CAM_A intrinsics 640x400:
+[[574.28826904   0.         354.75085449]
+ [  0.         574.28826904 215.23262024]
+ [  0.           0.           1.        ]]
+RGB_CAM_A distortion:
+[10.223235130310059, -109.25149536132812, -0.0004420211771503091, 0.0010316185653209686, 320.9173583984375, 9.922849655151367, -107.20381164550781, 315.3215026855469, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+LEFT_CAM_B intrinsics 640x400:
+[[404.87414551   0.         325.89746094]
+ [  0.         404.87414551 205.89299011]
+ [  0.           0.           1.        ]]
+LEFT_CAM_B distortion:
+[-11.122488975524902, 109.8750991821289, 0.0012309490703046322, 0.00016624310228507966, -63.78889465332031, -11.161343574523926, 109.2431869506836, -62.381263732910156, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+RIGHT_CAM_C intrinsics 640x400:
+[[402.11419678   0.         305.57312012]
+ [  0.         402.11419678 181.50035095]
+ [  0.           0.           1.        ]]
+RIGHT_CAM_C distortion:
+[-11.058403015136719, 116.03304290771484, 0.001200336148031056, 0.0007351754466071725, -50.03533172607422, -11.08365535736084, 115.26385498046875, -48.353179931640625, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+Extrinsics LEFT_CAM_B -> RIGHT_CAM_C:
+[[ 9.99934435e-01 -1.04012787e-02 -4.79437830e-03 -7.53973818e+00]
+ [ 1.03934454e-02  9.99944627e-01 -1.65589596e-03 -1.58975851e-02]
+ [ 4.81133582e-03  1.60595716e-03  9.99987125e-01 -6.06021434e-02]
+ [ 0.00000000e+00  0.00000000e+00  0.00000000e+00  1.00000000e+00]]
+NOTE: DepthAI translation is usually in centimeters.
+RGB_CAM_A: failed to read camera->IMU extrinsics: IMU calibration data is not available on device yet.
+LEFT_CAM_B: failed to read camera->IMU extrinsics: IMU calibration data is not available on device yet.
+RIGHT_CAM_C: failed to read camera->IMU extrinsics: IMU calibration data is not available on device yet.
