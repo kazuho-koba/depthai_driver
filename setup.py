@@ -1,6 +1,6 @@
 from setuptools import setup
 
-package_name = 'oakd_openvins_bridge'
+package_name = 'depthai_driver'
 
 setup(
     name=package_name,
@@ -20,7 +20,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'oakd_stereo_imu_node = oakd_openvins_bridge.oakd_stereo_imu_node:main',
+            'oakd_stereo_imu_node = depthai_driver.oakd_stereo_imu_node:main',
         ],
     },
 )
