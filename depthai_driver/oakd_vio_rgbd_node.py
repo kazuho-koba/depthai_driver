@@ -9,7 +9,7 @@ from cv_bridge import CvBridge
 import depthai as dai
 import numpy as np
 from builtin_interfaces.msg import Time
-
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 class OakdVioRgbdNode(Node):
     def __init__(self):
@@ -23,6 +23,12 @@ class OakdVioRgbdNode(Node):
         self.latest_depth = None
 
         self.vio_frame_count = 0
+
+        sensor_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
+        )        
 
         # パラメータ類
         self.declare_parameter("mono_fps", 20.0)
@@ -44,10 +50,8 @@ class OakdVioRgbdNode(Node):
         self.pub_imu = self.create_publisher(Imu, "/imu0", 200)
 
         # その他のセンサ情報パブリッシャ
-        self.pub_color = self.create_publisher(
-            Image, "/oak/color/image_raw", 10)
-        self.pub_depth = self.create_publisher(
-            Image, "/oak/depth/image_raw", 10)
+        self.pub_color = self.create_publisher(Image, "/oak/color/image_raw", sensor_qos)
+        self.pub_depth = self.create_publisher(Image, "/oak/depth/image_raw", sensor_qos)
 
         self.pipeline = dai.Pipeline()
 
@@ -69,11 +73,11 @@ class OakdVioRgbdNode(Node):
         color_cam = self.pipeline.create(dai.node.ColorCamera)
         color_cam.setBoardSocket(dai.CameraBoardSocket.RGB)
         color_cam.setResolution(
-            dai.ColorCameraProperties.SensorResolution.THE_800_P
+            dai.ColorCameraProperties.SensorResolution.THE_1080_P
         )
         color_cam.setFps(rgb_fps)
         # Use preview output for lightweight RGB publishing.
-        color_cam.setPreviewSize(640, 400)
+        color_cam.setPreviewSize(1280, 800)
         color_cam.setInterleaved(False)
         color_cam.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
 
@@ -84,7 +88,7 @@ class OakdVioRgbdNode(Node):
         # Depth output is generated onboard.
         stereo.setDefaultProfilePreset(
             dai.node.StereoDepth.PresetMode.HIGH_DENSITY)
-        stereo.setDepthAlign(dai.CameraBoardSocket.RGB)
+        # stereo.setDepthAlign(dai.CameraBoardSocket.RGB)
 
         # If this causes issues on your DepthAI version, comment it out.
         try:
@@ -130,28 +134,35 @@ class OakdVioRgbdNode(Node):
         # -------------------------
         self.device = dai.Device(self.pipeline)
         self.q_left = self.device.getOutputQueue(
-            "left", maxSize=10, blocking=False
+            "left", maxSize=2, blocking=False
         )
         self.q_right = self.device.getOutputQueue(
-            "right", maxSize=10, blocking=False
+            "right", maxSize=2, blocking=False
         )
         self.q_color = self.device.getOutputQueue(
-            "color", maxSize=4, blocking=False
+            "color", maxSize=1, blocking=False
         )
         self.q_depth = self.device.getOutputQueue(
-            "depth", maxSize=4, blocking=False
+            "depth", maxSize=1, blocking=False
         )
         self.q_imu = self.device.getOutputQueue(
             "imu", maxSize=50, blocking=False
         )
 
         self.timer = self.create_timer(0.001, self.poll)
+        self.rgb_timer = self.create_timer(0.1, self.publish_color_timer)
+
+        self.color_recv_count = 0
+        self.color_pub_count = 0
+        self.last_count_time = self.get_clock().now()
 
         self.get_logger().info(
             "OAK-D VIO + RGB-D publisher started: "
             f"mono_fps={mono_fps}, rgb_fps={rgb_fps}, "
             f"imu_fps={imu_fps}, rgbd_publish_every_n={self.rgbd_publish_every_n}"
         )
+
+        
 
     def dai_time_to_ros_msg(self, dai_time):
         """
@@ -182,7 +193,7 @@ class OakdVioRgbdNode(Node):
         # -------------------------
         left = self.q_left.tryGet()
         right = self.q_right.tryGet()
-        color = self.q_color.tryGet()
+        # color = self.q_color.tryGet()
         depth = self.q_depth.tryGet()
 
         if left is not None:
@@ -191,9 +202,9 @@ class OakdVioRgbdNode(Node):
         if right is not None:
             self.latest_right = right
 
-        if color is not None:
-            self.latest_color = color
-
+        # if color is not None:
+        #     self.latest_color = color
+            
         if depth is not None:
             self.latest_depth = depth
 
@@ -284,14 +295,14 @@ class OakdVioRgbdNode(Node):
         This makes RGB-D output approximately synchronized to every Nth
         mono stereo pair.
         """
-        if self.latest_color is not None:
-            color_frame = self.latest_color.getCvFrame()
-            color_msg = self.bridge.cv2_to_imgmsg(color_frame, encoding="bgr8")
-            color_msg.header.stamp = stamp
-            color_msg.header.frame_id = "oak_rgb_camera_optical_frame"
-            self.pub_color.publish(color_msg)
+        # if self.latest_color is not None:
+        #     color_frame = self.latest_color.getCvFrame()
+        #     color_msg = self.bridge.cv2_to_imgmsg(color_frame, encoding="bgr8")
+        #     color_msg.header.stamp = stamp
+        #     color_msg.header.frame_id = "oak_rgb_camera_optical_frame"
+        #     self.pub_color.publish(color_msg)
 
-            self.latest_color = None
+        #     self.latest_color = None
 
         if self.latest_depth is not None:
             depth_frame = self.latest_depth.getFrame()
@@ -300,11 +311,40 @@ class OakdVioRgbdNode(Node):
             depth_msg = self.bridge.cv2_to_imgmsg(
                 depth_frame, encoding="16UC1")
             depth_msg.header.stamp = stamp
-            depth_msg.header.frame_id = "oak_rgb_camera_optical_frame"
+            depth_msg.header.frame_id = "oak_left_camera_optical_frame"
             self.pub_depth.publish(depth_msg)
 
             self.latest_depth = None
 
+    def publish_color_timer(self):
+        colors = self.q_color.tryGetAll()
+        if len(colors) == 0:
+            return
+
+        color_msg_dai = colors[-1]
+
+        self.color_recv_count += 1
+
+        stamp = self.dai_time_to_ros_msg(color_msg_dai.getTimestamp())
+        color_frame = color_msg_dai.getCvFrame()
+
+        color_msg = self.bridge.cv2_to_imgmsg(color_frame, encoding="bgr8")
+        color_msg.header.stamp = stamp
+        color_msg.header.frame_id = "oak_rgb_camera_optical_frame"
+
+        self.pub_color.publish(color_msg)
+        self.color_pub_count += 1
+
+        now = self.get_clock().now()
+        if (now - self.last_count_time).nanoseconds > 1e9:
+
+            self.get_logger().info(
+                f"RGB recv={self.color_recv_count}Hz "
+                f"pub={self.color_pub_count}Hz"
+            )
+            self.color_recv_count = 0
+            self.color_pub_count = 0
+            self.last_count_time = now
 
 def main(args=None):
     rclpy.init(args=args)
