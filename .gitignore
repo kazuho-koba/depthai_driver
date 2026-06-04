@@ -8,4 +8,5 @@ datasets/oakd_calib/bags
 datasets/oakd_calib/**/*.bag
 datasets/oakd_calib/**/*.db3
 datasets/oakd_calib/**/*.db3-wal
-datasets/oakd_calib/**/*.db3-shm
+datasets/oakd_calib/**/*.db3-shm__pycache__/
+*.pyc
