@@ -91,7 +91,7 @@ class OakdVioRgbdNode(Node):
         stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_DENSITY)
         stereo.setDepthAlign(dai.CameraBoardSocket.RGB)
         stereo.setOutputSize(640, 400)
-        stereo.initialConfig.setConfidenceThreshold(245)
+        stereo.initialConfig.setConfidenceThreshold(200)
 
         mono_left.out.link(stereo.left)
         mono_right.out.link(stereo.right)
