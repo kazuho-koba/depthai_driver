@@ -147,9 +147,7 @@ class OakdStereoImuNode(Node):
                         packet.acceleroMeter.getTimestamp()
                     )
                 elif hasattr(packet.gyroscope, "getTimestamp"):
-                    stamp = self.dai_time_to_ros_msg(
-                        packet.gyroscope.getTimestamp()
-                    )
+                    stamp = self.dai_time_to_ros_msg(packet.gyroscope.getTimestamp())
                 else:
                     continue
 
