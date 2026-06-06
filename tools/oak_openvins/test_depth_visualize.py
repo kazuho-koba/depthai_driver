@@ -31,7 +31,7 @@ stereo = pipeline.create(dai.node.StereoDepth)
 stereo.setLeftRightCheck(True)
 stereo.setExtendedDisparity(False)
 stereo.setSubpixel(True)
-stereo.initialConfig.setConfidenceThreshold(200)
+stereo.initialConfig.setConfidenceThreshold(240)
 
 conf = stereo.initialConfig.getConfidenceThreshold()
 print("confidence =", conf)
