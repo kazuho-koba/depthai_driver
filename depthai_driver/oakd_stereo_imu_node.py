@@ -20,9 +20,9 @@ class OakdStereoImuNode(Node):
         self.latest_left = None
         self.latest_right = None
 
-        self.pub_left = self.create_publisher(Image, "/cam0/image_raw", 10)
-        self.pub_right = self.create_publisher(Image, "/cam1/image_raw", 10)
-        self.pub_imu = self.create_publisher(Imu, "/imu0", 200)
+        self.pub_left = self.create_publisher(Image, "/oak/stereo/left/image_raw", 10)
+        self.pub_right = self.create_publisher(Image, "/oak/stereo/right/image_raw", 10)
+        self.pub_imu = self.create_publisher(Imu, "/oak/imu/data", 200)
 
         self.pipeline = dai.Pipeline()
 

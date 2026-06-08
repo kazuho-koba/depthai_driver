@@ -46,9 +46,9 @@ class OakdVioRgbdNode(Node):
             self.rgbd_publish_every_n = 1
 
         # （主に）Visual Odometry用のセンサ情報パブリッシャ
-        self.pub_left = self.create_publisher(Image, "/cam0/image_raw", 10)
-        self.pub_right = self.create_publisher(Image, "/cam1/image_raw", 10)
-        self.pub_imu = self.create_publisher(Imu, "/imu0", 200)
+        self.pub_left = self.create_publisher(Image, "/oak/stereo/left/image_raw", 10)
+        self.pub_right = self.create_publisher(Image, "/oak/stereo/right/image_raw", 10)
+        self.pub_imu = self.create_publisher(Imu, "/oak/imu/data", 200)
 
         # その他のセンサ情報パブリッシャ
         self.pub_color = self.create_publisher(
