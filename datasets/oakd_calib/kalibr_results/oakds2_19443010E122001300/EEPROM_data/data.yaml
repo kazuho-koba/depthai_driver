@@ -1,0 +1,33 @@
+root@kazuho-host:/workspaces/ros2_ws# python3 src/depthai_driver/tools/oak_openvins/read_oak_calib.py EEPROM data:
+<depthai.EepromData object at 0x7ff0dbbfe870>
+
+RGB_CAM_A intrinsics 640x400:
+[[573.98858643   0.         310.27999878]
+ [  0.         573.98858643 192.82965088]
+ [  0.           0.           1.        ]]
+RGB_CAM_A distortion:
+[10.49008560180664, -126.0577621459961, 0.0006114704301580787, 2.6562727725831792e-05, 420.350341796875, 10.104997634887695, -123.00650024414062, 411.59393310546875, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+LEFT_CAM_B intrinsics 640x400:
+[[401.22625732   0.         325.62234497]
+ [  0.         401.22625732 205.53269958]
+ [  0.           0.           1.        ]]
+LEFT_CAM_B distortion:
+[-8.430391311645508, 90.29701232910156, 0.00013916245370637625, -0.001599936280399561, -49.66891860961914, -8.494547843933105, 89.90287017822266, -48.78705596923828, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+RIGHT_CAM_C intrinsics 640x400:
+[[399.81143188   0.         332.14752197]
+ [  0.         399.81143188 203.43859863]
+ [  0.           0.           1.        ]]
+RIGHT_CAM_C distortion:
+[-6.075622081756592, 84.984619140625, -0.001667091273702681, 0.0011797648621723056, -19.7407169342041, -6.154603004455566, 84.45159149169922, -18.7219295501709, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+Extrinsics LEFT_CAM_B -> RIGHT_CAM_C:
+[[ 9.99954164e-01 -3.53104132e-03 -8.90080724e-03 -7.51163721e+00]
+ [ 3.52361868e-03  9.99993443e-01 -8.49455071e-04  7.16668507e-03]
+ [ 8.90374836e-03  8.18053086e-04  9.99960005e-01 -3.34343128e-02]
+ [ 0.00000000e+00  0.00000000e+00  0.00000000e+00  1.00000000e+00]]
+NOTE: DepthAI translation is usually in centimeters.
+RGB_CAM_A: failed to read camera->IMU extrinsics: IMU calibration data is not available on device yet.
+LEFT_CAM_B: failed to read camera->IMU extrinsics: IMU calibration data is not available on device yet.
+RIGHT_CAM_C: failed to read camera->IMU extrinsics: IMU calibration data is not available on device yet.
