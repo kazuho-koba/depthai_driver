@@ -22,6 +22,7 @@ setup(
         'console_scripts': [
             'oakd_stereo_imu_node = depthai_driver.oakd_stereo_imu_node:main',
             'oakd_vio_rgbd_node = depthai_driver.oakd_vio_rgbd_node:main',
+            'oakd_freq_test = depthai_driver.oakd_freq_test:main',
         ],
     },
 )
