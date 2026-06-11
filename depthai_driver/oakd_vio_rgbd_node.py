@@ -28,8 +28,10 @@ class OakdVioRgbdNode(Node):
         sensor_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
-            depth=5,
+            depth=10,
         )
+        self.get_logger().info("set depth as 10")
+
 
         # パラメータ類
         self.declare_parameter("mono_fps", 20.0)
