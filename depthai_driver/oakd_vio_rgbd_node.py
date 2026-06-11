@@ -26,7 +26,7 @@ class OakdVioRgbdNode(Node):
         self.vio_frame_count = 0
 
         sensor_qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
             depth=5,
         )
