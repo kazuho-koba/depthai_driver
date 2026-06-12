@@ -206,6 +206,7 @@ class OakdVioRgbdNode(Node):
             self._update_period_stats("right", right)
             self.latest_right = right
 
+        color_received = False
         if color is not None:
             self.stats["color_rx"] += 1
             self._update_period_stats("color", color)
