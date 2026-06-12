@@ -211,6 +211,10 @@ class OakdVioRgbdNode(Node):
             self._update_period_stats("color", color)
             self.latest_color = color
 
+            # RGB到着をトリガにRGB-D publish
+            self.stats["rgbd_call"] += 1
+            self.publish_latest_rgbd()
+
         if depth is not None:
             self.stats["depth_rx"] += 1
             self._update_period_stats("depth", depth)
@@ -248,10 +252,6 @@ class OakdVioRgbdNode(Node):
             self.stats["mono_pub_ms_sum"] += (time.perf_counter() - t_pub) * 1000.0
             self.stats["mono_pub_count"] += 1
 
-            publish_rgbd = self.vio_frame_count % self.rgbd_publish_every_n == 0
-            if publish_rgbd:
-                self.stats["rgbd_call"] += 1
-                self.publish_latest_rgbd()
 
         imu_packets = self.q_imu.tryGet()
         if imu_packets is not None:
