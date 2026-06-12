@@ -137,7 +137,6 @@ class OakdVioRgbdNode(Node):
         self.get_logger().info(
             "OAK-D VIO + RGB-D publisher started: "
             f"mono_fps={mono_fps}, rgb_fps={rgb_fps}, "
-            f"imu_fps={imu_fps}, rgbd_publish_every_n={self.rgbd_publish_every_n}"
         )
 
     def dai_time_to_ros_msg(self, dai_time):
@@ -262,10 +261,7 @@ class OakdVioRgbdNode(Node):
     def publish_latest_rgbd(self):
         """
         Publish the most recent RGB and depth frames.
-
-        The stamp is intentionally tied to the VIO stereo frame timing.
-        This makes RGB-D output approximately synchronized to every Nth
-        mono stereo pair.
+        The freq of publishment belongs with freq of RGB image
         """
 
         if self.latest_color is None or self.latest_depth is None:
