@@ -32,21 +32,14 @@ class OakdVioRgbdNode(Node):
             history=HistoryPolicy.KEEP_LAST,
             depth=10,
         )
-        self.get_logger().info("set depth as 10")
 
         # パラメータ類
         self.declare_parameter("mono_fps", 20.0)
         self.declare_parameter("rgb_fps", 10.0)
         self.declare_parameter("imu_fps", 125.0)
-        self.declare_parameter("rgbd_publish_every_n", 2)
         mono_fps = float(self.get_parameter("mono_fps").value)
         rgb_fps = float(self.get_parameter("rgb_fps").value)
         imu_fps = int(self.get_parameter("imu_fps").value)
-        self.rgbd_publish_every_n = int(
-            self.get_parameter("rgbd_publish_every_n").value
-        )
-        if self.rgbd_publish_every_n < 1:
-            self.rgbd_publish_every_n = 1
 
         # （主に）Visual Odometry用のセンサ情報パブリッシャ
         self.pub_left = self.create_publisher(Image, "/oak/stereo/left/image_raw", 5)
@@ -185,8 +178,10 @@ class OakdVioRgbdNode(Node):
         if right is not None:
             self.latest_right = right
 
+        color_received = False
         if color is not None:
             self.latest_color = color
+            color_received = True
 
         if depth is not None:
             self.latest_depth = depth
@@ -221,12 +216,11 @@ class OakdVioRgbdNode(Node):
             self.pub_left.publish(left_msg)
             self.pub_right.publish(right_msg)
 
-            # -------------------------
-            # Publish RGB-D at decimated rate
-            # -------------------------
-            publish_rgbd = self.vio_frame_count % self.rgbd_publish_every_n == 0
-            if publish_rgbd:
-                self.publish_latest_rgbd()
+        # -------------------------
+        # Publish RGB-D at decimated rate
+        # -------------------------
+        if color_received:
+            self.publish_latest_rgbd()
 
         # --- IMU ---
         imu_packets = self.q_imu.tryGet()
