@@ -45,7 +45,7 @@ class OakdStereoImuNode(Node):
         imu.enableIMUSensor(dai.IMUSensor.ACCELEROMETER, 125)
         imu.enableIMUSensor(dai.IMUSensor.GYROSCOPE_CALIBRATED, 125)
         imu.setBatchReportThreshold(1)
-        imu.setMaxBatchReports(1)
+        imu.setMaxBatchReports(10)
 
         # XLink outputs
         xout_left = self.pipeline.createXLinkOut()

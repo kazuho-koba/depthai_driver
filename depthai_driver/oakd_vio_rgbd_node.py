@@ -99,7 +99,7 @@ class OakdVioRgbdNode(Node):
         imu.enableIMUSensor(dai.IMUSensor.ACCELEROMETER, imu_fps)
         imu.enableIMUSensor(dai.IMUSensor.GYROSCOPE_CALIBRATED, imu_fps)
         imu.setBatchReportThreshold(1)
-        imu.setMaxBatchReports(1)
+        imu.setMaxBatchReports(10)
 
         # XLink outputs
         xout_left = self.pipeline.createXLinkOut()
