@@ -8,8 +8,8 @@ pipeline = dai.Pipeline()
 mono_left = pipeline.create(dai.node.MonoCamera)
 mono_right = pipeline.create(dai.node.MonoCamera)
 
-mono_left.setBoardSocket(dai.CameraBoardSocket.LEFT)
-mono_right.setBoardSocket(dai.CameraBoardSocket.RIGHT)
+mono_left.setBoardSocket(dai.CameraBoardSocket.CAM_B)
+mono_right.setBoardSocket(dai.CameraBoardSocket.CAM_C)
 
 mono_left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
 mono_right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
@@ -40,7 +40,7 @@ with dai.Device(pipeline) as device:
         if left_msg is not None:
             frame = left_msg.getCvFrame()
             frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-            cv2.putText(frame, "CameraBoardSocket.LEFT",
+            cv2.putText(frame, "CameraBoardSocket.CAM_B (left)",
                         (20, 40), cv2.FONT_HERSHEY_SIMPLEX,
                         0.8, (255, 255, 255), 2)
             cv2.imshow("socket LEFT", frame)
@@ -48,7 +48,7 @@ with dai.Device(pipeline) as device:
         if right_msg is not None:
             frame = right_msg.getCvFrame()
             frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-            cv2.putText(frame, "CameraBoardSocket.RIGHT",
+            cv2.putText(frame, "CameraBoardSocket.CAM_C (right)",
                         (20, 40), cv2.FONT_HERSHEY_SIMPLEX,
                         0.8, (255, 255, 255), 2)
             cv2.imshow("socket RIGHT", frame)

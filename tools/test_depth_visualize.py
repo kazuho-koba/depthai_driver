@@ -16,12 +16,12 @@ pipeline = dai.Pipeline()
 
 # 左右のモノクロカメラ
 left = pipeline.create(dai.node.MonoCamera)
-left.setBoardSocket(dai.CameraBoardSocket.LEFT)
+left.setBoardSocket(dai.CameraBoardSocket.CAM_B)
 left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
 left.setFps(30)
 
 right = pipeline.create(dai.node.MonoCamera)
-right.setBoardSocket(dai.CameraBoardSocket.RIGHT)
+right.setBoardSocket(dai.CameraBoardSocket.CAM_C)
 right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
 right.setFps(30)
 

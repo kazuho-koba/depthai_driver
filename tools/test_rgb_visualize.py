@@ -6,7 +6,7 @@ pipeline = dai.Pipeline()
 
 # Color camera
 cam_rgb = pipeline.create(dai.node.ColorCamera)
-cam_rgb.setBoardSocket(dai.CameraBoardSocket.RGB)
+cam_rgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)
 
 # OAK-D S2のRGBカメラは1080P以上推奨
 cam_rgb.setResolution(
