@@ -2,14 +2,13 @@
 
 import rclpy
 from rclpy.node import Node
-import time
 from collections import defaultdict
 
 from sensor_msgs.msg import Image, Imu
 from cv_bridge import CvBridge
+from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 
 import depthai as dai
-import numpy as np
 from builtin_interfaces.msg import Time
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
@@ -26,6 +25,8 @@ class OakdVioRgbdNode(Node):
         self.latest_depth = None
 
         self.vio_frame_count = 0
+        self.last_sequence = {}
+        self.cumulative_sequence_gap = defaultdict(int)
 
         sensor_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
@@ -45,6 +46,28 @@ class OakdVioRgbdNode(Node):
         self.pub_left = self.create_publisher(Image, "/oak/stereo/left/image_raw", 5)
         self.pub_right = self.create_publisher(Image, "/oak/stereo/right/image_raw", 5)
         self.pub_imu = self.create_publisher(Imu, "/oak/imu/data", 100)
+
+        # Per-sample DepthAI metadata is kept separate from the stable Image/Imu
+        # interfaces. This preserves the existing OpenVINS inputs while making
+        # device-clock synchronization and sequence gaps observable in rosbag.
+        self.pub_left_metadata = self.create_publisher(
+            DiagnosticArray, "/oak/diagnostics/left_frame", 100
+        )
+        self.pub_right_metadata = self.create_publisher(
+            DiagnosticArray, "/oak/diagnostics/right_frame", 100
+        )
+        self.pub_color_metadata = self.create_publisher(
+            DiagnosticArray, "/oak/diagnostics/color_frame", 50
+        )
+        self.pub_depth_metadata = self.create_publisher(
+            DiagnosticArray, "/oak/diagnostics/depth_frame", 50
+        )
+        self.pub_imu_metadata = self.create_publisher(
+            DiagnosticArray, "/oak/diagnostics/imu_packet", 200
+        )
+        self.pub_device_info = self.create_publisher(
+            DiagnosticArray, "/oak/diagnostics/device_info", 10
+        )
 
         # その他のセンサ情報パブリッシャ
         self.pub_color = self.create_publisher(
@@ -126,6 +149,7 @@ class OakdVioRgbdNode(Node):
         # Device and output queues
         # -------------------------
         self.device = dai.Device(self.pipeline)
+        self.mx_id = str(self.device.getMxId())
         self.q_left = self.device.getOutputQueue("left", maxSize=2, blocking=False)
         self.q_right = self.device.getOutputQueue("right", maxSize=2, blocking=False)
         self.q_color = self.device.getOutputQueue("color", maxSize=1, blocking=False)
@@ -133,16 +157,141 @@ class OakdVioRgbdNode(Node):
         self.q_imu = self.device.getOutputQueue("imu", maxSize=50, blocking=False)
 
         self.timer = self.create_timer(0.002, self.poll)
+        # Repeat device identity so late rosbag discovery still records it.
+        self.device_info_timer = self.create_timer(5.0, self.publish_device_info)
+        self.publish_device_info()
 
         self.get_logger().info(
             "OAK-D VIO + RGB-D publisher started: "
             f"mono_fps={mono_fps}, rgb_fps={rgb_fps}, "
         )
 
+    @staticmethod
+    def timedelta_to_ns(value):
+        """Convert a DepthAI timedelta to integer nanoseconds."""
+        return int(round(value.total_seconds() * 1e9))
+
+    @staticmethod
+    def key_value(key, value):
+        """Create one stable diagnostic key/value entry."""
+        return KeyValue(key=key, value=str(value))
+
+    @staticmethod
+    def read_device_value(callback):
+        """Read optional device information without stopping sensor output."""
+        try:
+            return str(callback())
+        except Exception as error:
+            return "unavailable: {}".format(error)
+
+    def update_sequence_gap(self, stream_name, sequence_num):
+        """Return missing messages before sequence_num and cumulative count."""
+        previous = self.last_sequence.get(stream_name)
+        self.last_sequence[stream_name] = sequence_num
+        gap = 0
+        if previous is not None:
+            delta = (sequence_num - previous) & 0xFFFFFFFF
+            # A large backwards jump means device/pipeline reset, not a drop.
+            if 0 < delta < 0x80000000:
+                gap = max(delta - 1, 0)
+        self.cumulative_sequence_gap[stream_name] += gap
+        return gap, self.cumulative_sequence_gap[stream_name]
+
+    def make_frame_metadata(self, frame, stream_name, image_header):
+        """Build metadata corresponding to one published DepthAI ImgFrame."""
+        metadata = DiagnosticArray()
+        metadata.header = image_header
+        sequence_num = frame.getSequenceNum()
+        gap, cumulative = self.update_sequence_gap(
+            stream_name, sequence_num
+        )
+        exposure_time_us = int(round(
+            frame.getExposureTime().total_seconds() * 1e6
+        ))
+        receive_time_ns = self.get_clock().now().nanoseconds
+        status = DiagnosticStatus()
+        # Depth is generated at mono_fps but intentionally published only
+        # when a color frame arrives (rgb_fps), so its sequence skips are
+        # expected rate conversion rather than evidence of a transport drop.
+        unexpected_gap = bool(gap and stream_name != "depth")
+        status.level = (
+            DiagnosticStatus.WARN if unexpected_gap else DiagnosticStatus.OK
+        )
+        status.name = "oak/{}/frame_metadata".format(stream_name)
+        status.message = (
+            "unexpected sequence gap" if unexpected_gap else
+            "expected RGB-D rate conversion" if gap else "OK"
+        )
+        status.hardware_id = self.mx_id
+        status.values = [
+            self.key_value("schema_version", 1),
+            self.key_value("stream_name", stream_name),
+            self.key_value("sequence_num", sequence_num),
+            self.key_value(
+                "device_timestamp_ns",
+                self.timedelta_to_ns(frame.getTimestampDevice()),
+            ),
+            self.key_value(
+                "host_synced_timestamp_ns",
+                self.timedelta_to_ns(frame.getTimestamp()),
+            ),
+            self.key_value("host_receive_time_ns", receive_time_ns),
+            self.key_value("sequence_gap", gap),
+            self.key_value("cumulative_sequence_gap", cumulative),
+            self.key_value("exposure_time_us", exposure_time_us),
+            # DepthAI 2.30 exposes ISO sensitivity, not analog gain.
+            self.key_value("sensitivity_iso", frame.getSensitivity()),
+            self.key_value(
+                "color_temperature_kelvin", frame.getColorTemperature()
+            ),
+            self.key_value("lens_position", frame.getLensPosition()),
+            self.key_value("width", frame.getWidth()),
+            self.key_value("height", frame.getHeight()),
+        ]
+        metadata.status = [status]
+        return metadata
+
+    def publish_device_info(self):
+        """Publish physical OAK identity and the active DepthAI runtime."""
+        message = DiagnosticArray()
+        message.header.stamp = self.get_clock().now().to_msg()
+        message.header.frame_id = "oak_device"
+        device_info = self.device.getDeviceInfo()
+        status = DiagnosticStatus()
+        status.level = DiagnosticStatus.OK
+        status.name = "oak/device_info"
+        status.message = "OK"
+        status.hardware_id = self.mx_id
+        status.values = [
+            self.key_value("schema_version", 1),
+            self.key_value("mx_id", self.mx_id),
+            self.key_value("device_name", getattr(device_info, "name", "")),
+            self.key_value(
+                "connected_imu",
+                self.read_device_value(self.device.getConnectedIMU),
+            ),
+            self.key_value(
+                "imu_firmware_version",
+                self.read_device_value(self.device.getIMUFirmwareVersion),
+            ),
+            self.key_value(
+                "embedded_imu_firmware_version",
+                self.read_device_value(
+                    self.device.getEmbeddedIMUFirmwareVersion
+                ),
+            ),
+            self.key_value(
+                "usb_speed", self.read_device_value(self.device.getUsbSpeed)
+            ),
+            self.key_value("depthai_version", dai.__version__),
+        ]
+        message.status = [status]
+        self.pub_device_info.publish(message)
+
     def dai_time_to_ros_msg(self, dai_time):
         """
         Convert DepthAI timestamp(datetime.timedelta) to ROS builtin_interfaces/Time.
-        We align the first DepthAI timestamp to the current ROS clock.
+        We align the first host-synchronized DepthAI timestamp to the ROS clock.
         """
         dai_sec = dai_time.total_seconds()
 
@@ -198,7 +347,7 @@ class OakdVioRgbdNode(Node):
 
             self.vio_frame_count += 1
 
-            # Use DepthAI timestamp from one image.
+            # Use the host-synchronized DepthAI timestamp from one image.
             # Since left/right are captured by the stereo pair, we publish them with the same stamp.
             stamp = self.dai_time_to_ros_msg(left_msg_dai.getTimestamp())
             left_frame = left_msg_dai.getCvFrame()
@@ -214,6 +363,12 @@ class OakdVioRgbdNode(Node):
 
             self.pub_left.publish(left_msg)
             self.pub_right.publish(right_msg)
+            self.pub_left_metadata.publish(self.make_frame_metadata(
+                left_msg_dai, "left", left_msg.header
+            ))
+            self.pub_right_metadata.publish(self.make_frame_metadata(
+                right_msg_dai, "right", right_msg.header
+            ))
 
         # -------------------------
         # Publish RGB-D at decimated rate
@@ -224,10 +379,13 @@ class OakdVioRgbdNode(Node):
         # --- IMU ---
         imu_packets = self.q_imu.tryGet()
         if imu_packets is not None:
-            for packet in imu_packets.packets:
+            batch_size = len(imu_packets.packets)
+            for packet_index, packet in enumerate(imu_packets.packets):
                 msg = Imu()
 
-                # Prefer DepthAI device timestamp.
+                # Preserve the existing combined Imu header behavior: use the
+                # host-synchronized accelerometer timestamp. Raw device-clock
+                # accel/gyro timestamps are published in diagnostic metadata.
                 # Use accelerometer timestamp as representative timestamp
                 # for the combined accel+gyro IMU message.
                 if hasattr(packet.acceleroMeter, "getTimestamp"):
@@ -258,6 +416,83 @@ class OakdVioRgbdNode(Node):
 
                 self.pub_imu.publish(msg)
 
+                accel_sequence = accel.getSequenceNum()
+                gyro_sequence = gyro.getSequenceNum()
+                accel_gap, cumulative_accel_gap = self.update_sequence_gap(
+                    "imu_accelerometer", accel_sequence
+                )
+                gyro_gap, cumulative_gyro_gap = self.update_sequence_gap(
+                    "imu_gyroscope", gyro_sequence
+                )
+                accel_device_time = accel.getTimestampDevice()
+                gyro_device_time = gyro.getTimestampDevice()
+                accel_device_time_ns = self.timedelta_to_ns(accel_device_time)
+                gyro_device_time_ns = self.timedelta_to_ns(gyro_device_time)
+                metadata = DiagnosticArray()
+                metadata.header = msg.header
+                accel_gyro_delta_ns = (
+                    gyro_device_time_ns - accel_device_time_ns
+                )
+                status = DiagnosticStatus()
+                # The BNO086 may run accelerometer and gyroscope at different
+                # supported internal rates. Combined packets are paced by the
+                # accelerometer, so skipped gyro sequence numbers are normal.
+                status.level = (
+                    DiagnosticStatus.WARN
+                    if accel_gap else DiagnosticStatus.OK
+                )
+                status.name = "oak/imu_packet_metadata"
+                status.message = (
+                    "unexpected accelerometer sequence gap"
+                    if accel_gap else
+                    "expected IMU rate conversion" if gyro_gap else "OK"
+                )
+                status.hardware_id = self.mx_id
+                status.values = [
+                    self.key_value("schema_version", 1),
+                    self.key_value(
+                        "accelerometer_sequence_num", accel_sequence
+                    ),
+                    self.key_value("gyroscope_sequence_num", gyro_sequence),
+                    self.key_value(
+                        "accelerometer_device_timestamp_ns",
+                        accel_device_time_ns,
+                    ),
+                    self.key_value(
+                        "gyroscope_device_timestamp_ns",
+                        gyro_device_time_ns,
+                    ),
+                    self.key_value(
+                        "accelerometer_host_synced_timestamp_ns",
+                        self.timedelta_to_ns(accel.getTimestamp()),
+                    ),
+                    self.key_value(
+                        "gyroscope_host_synced_timestamp_ns",
+                        self.timedelta_to_ns(gyro.getTimestamp()),
+                    ),
+                    self.key_value(
+                        "host_receive_time_ns",
+                        self.get_clock().now().nanoseconds,
+                    ),
+                    self.key_value(
+                        "accel_to_gyro_device_delta_ns", accel_gyro_delta_ns
+                    ),
+                    self.key_value("accelerometer_sequence_gap", accel_gap),
+                    self.key_value("gyroscope_sequence_gap", gyro_gap),
+                    self.key_value(
+                        "cumulative_accelerometer_sequence_gap",
+                        cumulative_accel_gap,
+                    ),
+                    self.key_value(
+                        "cumulative_gyroscope_sequence_gap",
+                        cumulative_gyro_gap,
+                    ),
+                    self.key_value("batch_size", batch_size),
+                    self.key_value("packet_index", packet_index),
+                ]
+                metadata.status = [status]
+                self.pub_imu_metadata.publish(metadata)
+
     def publish_latest_rgbd(self):
         """
         Publish the most recent RGB and depth frames.
@@ -284,6 +519,12 @@ class OakdVioRgbdNode(Node):
 
         self.pub_color.publish(color_msg)
         self.pub_depth.publish(depth_msg)
+        self.pub_color_metadata.publish(self.make_frame_metadata(
+            self.latest_color, "color", color_msg.header
+        ))
+        self.pub_depth_metadata.publish(self.make_frame_metadata(
+            self.latest_depth, "depth", depth_msg.header
+        ))
 
         self.latest_color = None
         self.latest_depth = None
