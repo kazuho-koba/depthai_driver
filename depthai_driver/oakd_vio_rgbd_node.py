@@ -14,13 +14,23 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 
 class OakdVioRgbdNode(Node):
+    # A 2 ms Python timer can be delayed while converting/publishing images or
+    # while rosbag is serializing them. At 20 Hz, two queued stereo frames
+    # retain only 100 ms of history, so even a modest host-side stall silently
+    # loses VIO input. Keep a bounded one-second stereo buffer; larger stalls
+    # must remain visible in sequence diagnostics instead of being hidden by
+    # an excessive queue and later replayed as a burst.
+    STEREO_OUTPUT_QUEUE_SIZE = 20
+    RGBD_OUTPUT_QUEUE_SIZE = 10
+    IMU_OUTPUT_QUEUE_SIZE = 250
+
     def __init__(self):
         super().__init__("oakd_vio_rgbd_node")
 
         self.bridge = CvBridge()
 
-        self.latest_left = None
-        self.latest_right = None
+        self.pending_left = {}
+        self.pending_right = {}
         self.latest_color = None
         self.latest_depth = None
 
@@ -150,11 +160,24 @@ class OakdVioRgbdNode(Node):
         # -------------------------
         self.device = dai.Device(self.pipeline)
         self.mx_id = str(self.device.getMxId())
-        self.q_left = self.device.getOutputQueue("left", maxSize=2, blocking=False)
-        self.q_right = self.device.getOutputQueue("right", maxSize=2, blocking=False)
-        self.q_color = self.device.getOutputQueue("color", maxSize=1, blocking=False)
-        self.q_depth = self.device.getOutputQueue("depth", maxSize=1, blocking=False)
-        self.q_imu = self.device.getOutputQueue("imu", maxSize=50, blocking=False)
+        # Keep host queues non-blocking so a delayed ROS publisher cannot
+        # block the OAK pipeline.  Their capacity is deliberately large enough
+        # to absorb a transient host stall; poll() drains every pending sample.
+        self.q_left = self.device.getOutputQueue(
+            "left", maxSize=self.STEREO_OUTPUT_QUEUE_SIZE, blocking=False
+        )
+        self.q_right = self.device.getOutputQueue(
+            "right", maxSize=self.STEREO_OUTPUT_QUEUE_SIZE, blocking=False
+        )
+        self.q_color = self.device.getOutputQueue(
+            "color", maxSize=self.RGBD_OUTPUT_QUEUE_SIZE, blocking=False
+        )
+        self.q_depth = self.device.getOutputQueue(
+            "depth", maxSize=self.RGBD_OUTPUT_QUEUE_SIZE, blocking=False
+        )
+        self.q_imu = self.device.getOutputQueue(
+            "imu", maxSize=self.IMU_OUTPUT_QUEUE_SIZE, blocking=False
+        )
 
         self.timer = self.create_timer(0.002, self.poll)
         # Repeat device identity so late rosbag discovery still records it.
@@ -311,74 +334,70 @@ class OakdVioRgbdNode(Node):
         msg.nanosec = nanosec
         return msg
 
+    def publish_stereo_pair(self, left_msg_dai, right_msg_dai):
+        """Publish one sequence-matched stereo pair without dropping backlog."""
+        self.vio_frame_count += 1
+
+        # Use the host-synchronized DepthAI timestamp from one image. Since
+        # left/right are captured by the stereo pair, publish the same stamp.
+        stamp = self.dai_time_to_ros_msg(left_msg_dai.getTimestamp())
+        left_frame = left_msg_dai.getCvFrame()
+        right_frame = right_msg_dai.getCvFrame()
+
+        left_msg = self.bridge.cv2_to_imgmsg(left_frame, encoding="mono8")
+        left_msg.header.stamp = stamp
+        left_msg.header.frame_id = "cam0"
+
+        right_msg = self.bridge.cv2_to_imgmsg(right_frame, encoding="mono8")
+        right_msg.header.stamp = stamp
+        right_msg.header.frame_id = "cam1"
+
+        self.pub_left.publish(left_msg)
+        self.pub_right.publish(right_msg)
+        self.pub_left_metadata.publish(self.make_frame_metadata(
+            left_msg_dai, "left", left_msg.header
+        ))
+        self.pub_right_metadata.publish(self.make_frame_metadata(
+            right_msg_dai, "right", right_msg.header
+        ))
+
     def poll(self):
         # -------------------------
-        # Read latest queue data
+        # Drain every host-queue item before publishing.  tryGet() alone takes
+        # only one item per timer callback; with a small non-blocking queue,
+        # that made host scheduler stalls appear as multi-second device drops.
         # -------------------------
-        left = self.q_left.tryGet()
-        right = self.q_right.tryGet()
-        color = self.q_color.tryGet()
-        depth = self.q_depth.tryGet()
+        for frame in self.q_left.tryGetAll():
+            self.pending_left[frame.getSequenceNum()] = frame
+        for frame in self.q_right.tryGetAll():
+            self.pending_right[frame.getSequenceNum()] = frame
 
-        if left is not None:
-            self.latest_left = left
-
-        if right is not None:
-            self.latest_right = right
-
-        color_received = False
-        if color is not None:
-            self.latest_color = color
-            color_received = True
-
-        if depth is not None:
-            self.latest_depth = depth
+        color_frames = self.q_color.tryGetAll()
+        depth_frames = self.q_depth.tryGetAll()
+        if color_frames:
+            self.latest_color = color_frames[-1]
+        if depth_frames:
+            self.latest_depth = depth_frames[-1]
 
         # -------------------------
         # Publish stereo mono pair for VIO
         # -------------------------
-        if self.latest_left is not None and self.latest_right is not None:
-            left_msg_dai = self.latest_left
-            right_msg_dai = self.latest_right
-
-            # clear buffer after making one pair
-            self.latest_left = None
-            self.latest_right = None
-
-            self.vio_frame_count += 1
-
-            # Use the host-synchronized DepthAI timestamp from one image.
-            # Since left/right are captured by the stereo pair, we publish them with the same stamp.
-            stamp = self.dai_time_to_ros_msg(left_msg_dai.getTimestamp())
-            left_frame = left_msg_dai.getCvFrame()
-            right_frame = right_msg_dai.getCvFrame()
-
-            left_msg = self.bridge.cv2_to_imgmsg(left_frame, encoding="mono8")
-            left_msg.header.stamp = stamp
-            left_msg.header.frame_id = "cam0"
-
-            right_msg = self.bridge.cv2_to_imgmsg(right_frame, encoding="mono8")
-            right_msg.header.stamp = stamp
-            right_msg.header.frame_id = "cam1"
-
-            self.pub_left.publish(left_msg)
-            self.pub_right.publish(right_msg)
-            self.pub_left_metadata.publish(self.make_frame_metadata(
-                left_msg_dai, "left", left_msg.header
-            ))
-            self.pub_right_metadata.publish(self.make_frame_metadata(
-                right_msg_dai, "right", right_msg.header
-            ))
+        for sequence_num in sorted(
+            set(self.pending_left).intersection(self.pending_right)
+        ):
+            self.publish_stereo_pair(
+                self.pending_left.pop(sequence_num),
+                self.pending_right.pop(sequence_num),
+            )
 
         # -------------------------
         # Publish RGB-D at decimated rate
         # -------------------------
-        if color_received:
+        if color_frames:
             self.publish_latest_rgbd()
 
         # --- IMU ---
-        imu_packets = self.q_imu.tryGet()
-        if imu_packets is not None:
+        for imu_packets in self.q_imu.tryGetAll():
             batch_size = len(imu_packets.packets)
             for packet_index, packet in enumerate(imu_packets.packets):
                 msg = Imu()
