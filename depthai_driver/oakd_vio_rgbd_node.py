@@ -4,7 +4,7 @@ import rclpy
 from rclpy.node import Node
 from collections import defaultdict
 
-from sensor_msgs.msg import Image, Imu
+from sensor_msgs.msg import CameraInfo, Image, Imu
 from cv_bridge import CvBridge
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 
@@ -48,9 +48,13 @@ class OakdVioRgbdNode(Node):
         self.declare_parameter("mono_fps", 20.0)
         self.declare_parameter("rgb_fps", 10.0)
         self.declare_parameter("imu_fps", 125.0)
+        self.declare_parameter("rgb_optical_frame", "rgb_camera_optical_frame")
         mono_fps = float(self.get_parameter("mono_fps").value)
         rgb_fps = float(self.get_parameter("rgb_fps").value)
         imu_fps = int(self.get_parameter("imu_fps").value)
+        self.rgb_optical_frame = str(
+            self.get_parameter("rgb_optical_frame").value
+        )
 
         # （主に）Visual Odometry用のセンサ情報パブリッシャ
         self.pub_left = self.create_publisher(Image, "/oak/stereo/left/image_raw", 5)
@@ -85,6 +89,9 @@ class OakdVioRgbdNode(Node):
         )
         self.pub_depth = self.create_publisher(
             Image, "/oak/depth/image_raw", sensor_qos
+        )
+        self.pub_depth_info = self.create_publisher(
+            CameraInfo, "/oak/depth/camera_info", 1
         )
 
         self.pipeline = dai.Pipeline()
@@ -160,6 +167,7 @@ class OakdVioRgbdNode(Node):
         # -------------------------
         self.device = dai.Device(self.pipeline)
         self.mx_id = str(self.device.getMxId())
+        self.depth_camera_info = self.make_depth_camera_info()
         # Keep host queues non-blocking so a delayed ROS publisher cannot
         # block the OAK pipeline.  Their capacity is deliberately large enough
         # to absorb a transient host stall; poll() drains every pending sample.
@@ -188,6 +196,34 @@ class OakdVioRgbdNode(Node):
             "OAK-D VIO + RGB-D publisher started: "
             f"mono_fps={mono_fps}, rgb_fps={rgb_fps}, "
         )
+
+    def make_depth_camera_info(self):
+        """Describe the 640x400 depth image aligned to the RGB camera."""
+        calibration = self.device.readCalibration()
+        intrinsics = calibration.getCameraIntrinsics(
+            dai.CameraBoardSocket.RGB, 640, 400
+        )
+        distortion = calibration.getDistortionCoefficients(
+            dai.CameraBoardSocket.RGB
+        )
+        message = CameraInfo()
+        message.header.frame_id = self.rgb_optical_frame
+        message.width = 640
+        message.height = 400
+        message.distortion_model = "rational_polynomial"
+        message.d = [float(value) for value in distortion[:8]]
+        message.k = [
+            float(intrinsics[0][0]), 0.0, float(intrinsics[0][2]),
+            0.0, float(intrinsics[1][1]), float(intrinsics[1][2]),
+            0.0, 0.0, 1.0,
+        ]
+        message.r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+        message.p = [
+            message.k[0], 0.0, message.k[2], 0.0,
+            0.0, message.k[4], message.k[5], 0.0,
+            0.0, 0.0, 1.0, 0.0,
+        ]
+        return message
 
     @staticmethod
     def timedelta_to_ns(value):
@@ -526,7 +562,7 @@ class OakdVioRgbdNode(Node):
         color_msg.header.stamp = self.dai_time_to_ros_msg(
             self.latest_color.getTimestamp()
         )
-        color_msg.header.frame_id = "oak_rgb_camera_optical_frame"
+        color_msg.header.frame_id = self.rgb_optical_frame
 
         depth_frame = self.latest_depth.getFrame()
         # StereoDepth depth output is usually uint16 depth in millimeters.
@@ -534,10 +570,12 @@ class OakdVioRgbdNode(Node):
         depth_msg.header.stamp = self.dai_time_to_ros_msg(
             self.latest_depth.getTimestamp()
         )
-        depth_msg.header.frame_id = "oak_rgb_camera_optical_frame"
+        depth_msg.header.frame_id = self.rgb_optical_frame
 
         self.pub_color.publish(color_msg)
         self.pub_depth.publish(depth_msg)
+        self.depth_camera_info.header.stamp = depth_msg.header.stamp
+        self.pub_depth_info.publish(self.depth_camera_info)
         self.pub_color_metadata.publish(self.make_frame_metadata(
             self.latest_color, "color", color_msg.header
         ))
