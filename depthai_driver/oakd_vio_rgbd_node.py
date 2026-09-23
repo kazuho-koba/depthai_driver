@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Publish OAK-D S2 VIO inputs, RGB-D images, and non-invasive diagnostics.
+"""OAK-D S2のVIO入力、RGB-D画像、非侵襲診断情報をpublishする。
 
-Image and IMU topics are the stable OpenVINS interface. Per-device timestamps,
-sequences, exposure and USB identity are emitted separately as DiagnosticArray
-messages so a diagnostic feature never changes the VIO-facing ROS contract.
+ImageとIMU topicは安定したOpenVINS入力interfaceである。deviceごとのtimestamp、
+sequence、露光、USB identityはDiagnosticArrayとして別出力し、診断機能によって
+VIO側のROS契約を変えない。
 
-``poll()`` drains non-blocking DepthAI queues, converts each packet to its ROS
-message, publishes the matching metadata with the same ROS header, and tracks
-sequence gaps per stream. The periodic device-info publisher makes identity and
-USB state available even if rosbag recording starts after the camera node.
+``poll()``はnon-blocking DepthAI queueをdrainし、各packetをROS messageへ変換して、
+同じROS headerのmetadataをpublishし、stream別sequence gapを追跡する。定期的な
+device-info publishにより、camera nodeより後にrosbag記録を始めてもidentityとUSB状態を残す。
 """
 
 import rclpy
@@ -25,12 +24,10 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 
 class OakdVioRgbdNode(Node):
-    # A 2 ms Python timer can be delayed while converting/publishing images or
-    # while rosbag is serializing them. At 20 Hz, two queued stereo frames
-    # retain only 100 ms of history, so even a modest host-side stall silently
-    # loses VIO input. Keep a bounded one-second stereo buffer; larger stalls
-    # must remain visible in sequence diagnostics instead of being hidden by
-    # an excessive queue and later replayed as a burst.
+    # 2 msのPython timerは画像変換・publishやrosbag serializationで遅延し得る。20 Hzで
+    # stereo frameを2個だけqueueすると履歴は100 msしかなく、小さなhost側stallでもVIO入力を
+    # 見えない形で失う。1秒分の上限付きstereo bufferを持たせ、より大きなstallは過大queueで
+    # 隠してburst再生せず、sequence診断に現れるようにする。
     STEREO_OUTPUT_QUEUE_SIZE = 20
     RGBD_OUTPUT_QUEUE_SIZE = 10
     IMU_OUTPUT_QUEUE_SIZE = 250
@@ -40,9 +37,8 @@ class OakdVioRgbdNode(Node):
 
         self.bridge = CvBridge()
 
-        # Stereo frames are paired by device sequence in poll(). Keep the two
-        # sides independent until both are present; pairing by host arrival
-        # order would hide one-sided USB/host scheduling delays.
+        # stereo frameはpoll()でdevice sequenceにより対にする。両側が揃うまで独立に保持し、
+        # host到着順で組み合わせて片側のUSB/host scheduling遅延を隠さない。
         self.pending_left = {}
         self.pending_right = {}
         self.latest_color = None
@@ -75,9 +71,8 @@ class OakdVioRgbdNode(Node):
         self.pub_right = self.create_publisher(Image, "/oak/stereo/right/image_raw", 5)
         self.pub_imu = self.create_publisher(Imu, "/oak/imu/data", 100)
 
-        # Per-sample DepthAI metadata is kept separate from the stable Image/Imu
-        # interfaces. This preserves the existing OpenVINS inputs while making
-        # device-clock synchronization and sequence gaps observable in rosbag.
+        # sampleごとのDepthAI metadataは安定したImage/Imu interfaceと分離する。これにより
+        # 既存OpenVINS入力を保ちつつ、device clock同期とsequence gapをrosbagで観測可能にする。
         self.pub_left_metadata = self.create_publisher(
             DiagnosticArray, "/oak/diagnostics/left_frame", 100
         )
@@ -106,6 +101,9 @@ class OakdVioRgbdNode(Node):
         )
         self.pub_depth_info = self.create_publisher(
             CameraInfo, "/oak/depth/camera_info", 1
+        )
+        self.pub_color_info = self.create_publisher(
+            CameraInfo, "/oak/color/camera_info", 1
         )
 
         self.pipeline = dai.Pipeline()
@@ -182,9 +180,9 @@ class OakdVioRgbdNode(Node):
         self.device = dai.Device(self.pipeline)
         self.mx_id = str(self.device.getMxId())
         self.depth_camera_info = self.make_depth_camera_info()
-        # Keep host queues non-blocking so a delayed ROS publisher cannot
-        # block the OAK pipeline.  Their capacity is deliberately large enough
-        # to absorb a transient host stall; poll() drains every pending sample.
+        self.color_camera_info = self.make_color_camera_info()
+        # ROS publisher遅延がOAK pipelineをblockしないようhost queueをnon-blockingにする。
+        # 一時的なhost stallを吸収できる容量を持たせ、poll()は保留sampleを全てdrainする。
         self.q_left = self.device.getOutputQueue(
             "left", maxSize=self.STEREO_OUTPUT_QUEUE_SIZE, blocking=False
         )
@@ -202,7 +200,7 @@ class OakdVioRgbdNode(Node):
         )
 
         self.timer = self.create_timer(0.002, self.poll)
-        # Repeat device identity so late rosbag discovery still records it.
+        # rosbagのtopic discoveryが遅れても記録されるようdevice identityを繰り返し出す。
         self.device_info_timer = self.create_timer(5.0, self.publish_device_info)
         self.publish_device_info()
 
@@ -212,10 +210,25 @@ class OakdVioRgbdNode(Node):
         )
 
     def make_depth_camera_info(self):
-        """Describe the 640x400 depth image aligned to the RGB camera."""
+        """RGB基準でaspect ratioを保って出力するdepth画像のCameraInfoを作る。"""
+        return self.make_rgb_camera_info(keep_aspect_ratio=True)
+
+    def make_color_camera_info(self):
+        """stretch preview設定に一致するcolor画像のCameraInfoを作る。"""
+        return self.make_rgb_camera_info(keep_aspect_ratio=False)
+
+    def make_rgb_camera_info(self, keep_aspect_ratio):
+        """RGB EEPROM校正値を指定画像変換に合わせてCameraInfoへ格納する。
+
+        RGB previewは640x400へaspect ratioを保たずstretchする一方、StereoDepthの
+        depth出力は既定でaspect ratioを保ってresize/cropする。そのため画像寸法が同じ
+        でも、各streamに対応する焦点距離が異なる。ここではKとDを起動時に一度だけ
+        作り、各frameではtimestampだけを更新してROS message生成負荷を抑える。
+        """
         calibration = self.device.readCalibration()
         intrinsics = calibration.getCameraIntrinsics(
-            dai.CameraBoardSocket.RGB, 640, 400
+            dai.CameraBoardSocket.RGB, 640, 400,
+            keepAspectRatio=keep_aspect_ratio,
         )
         distortion = calibration.getDistortionCoefficients(
             dai.CameraBoardSocket.RGB
@@ -264,7 +277,7 @@ class OakdVioRgbdNode(Node):
         gap = 0
         if previous is not None:
             delta = (sequence_num - previous) & 0xFFFFFFFF
-            # A large backwards jump means device/pipeline reset, not a drop.
+            # 大きな逆方向jumpはdropではなくdevice/pipeline resetとみなす。
             if 0 < delta < 0x80000000:
                 gap = max(delta - 1, 0)
         self.cumulative_sequence_gap[stream_name] += gap
@@ -283,9 +296,8 @@ class OakdVioRgbdNode(Node):
         ))
         receive_time_ns = self.get_clock().now().nanoseconds
         status = DiagnosticStatus()
-        # Depth is generated at mono_fps but intentionally published only
-        # when a color frame arrives (rgb_fps), so its sequence skips are
-        # expected rate conversion rather than evidence of a transport drop.
+        # depthはmono_fpsで生成するが、意図してcolor frame到着時（rgb_fps）だけpublishする。
+        # したがってそのsequence skipは転送dropではなく想定したrate変換である。
         unexpected_gap = bool(gap and stream_name != "depth")
         status.level = (
             DiagnosticStatus.WARN if unexpected_gap else DiagnosticStatus.OK
@@ -312,7 +324,7 @@ class OakdVioRgbdNode(Node):
             self.key_value("sequence_gap", gap),
             self.key_value("cumulative_sequence_gap", cumulative),
             self.key_value("exposure_time_us", exposure_time_us),
-            # DepthAI 2.30 exposes ISO sensitivity, not analog gain.
+            # DepthAI 2.30が公開するのはanalog gainではなくISO sensitivityである。
             self.key_value("sensitivity_iso", frame.getSensitivity()),
             self.key_value(
                 "color_temperature_kelvin", frame.getColorTemperature()
@@ -588,6 +600,9 @@ class OakdVioRgbdNode(Node):
 
         self.pub_color.publish(color_msg)
         self.pub_depth.publish(depth_msg)
+        # 画像ごとに対応するCameraInfoのtimestampを設定する。K/Dは起動時に生成済み。
+        self.color_camera_info.header.stamp = color_msg.header.stamp
+        self.pub_color_info.publish(self.color_camera_info)
         self.depth_camera_info.header.stamp = depth_msg.header.stamp
         self.pub_depth_info.publish(self.depth_camera_info)
         self.pub_color_metadata.publish(self.make_frame_metadata(

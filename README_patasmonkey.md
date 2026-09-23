@@ -11,6 +11,31 @@ VIOの不調を、画像特徴不足だけでなく、左右画像・IMUの時�
 露光、USB接続状態、host側の遅延から区別できるようにします。診断topicは
 `pm_bag_global_localization.launch.py`のrosbag対象に含まれます。
 
+## RGB-D CameraInfo
+
+RGB-D画像には、次のCameraInfoも出力します。
+
+| Topic | 内容 |
+|---|---|
+| `/oak/color/camera_info` | RGB EEPROM校正値を640×400のcolor preview（aspect ratioを保たないstretch）に合わせた内部行列・歪み係数 |
+| `/oak/depth/camera_info` | 同じRGB EEPROM校正値をRGB整列depth出力（aspect ratioを保つ既定resize）に合わせた内部行列・歪み係数 |
+
+2つの画像は同じ640×400でもresize方法が異なるため、CameraInfoの焦点距離が異なります。
+後段で画素単位のcolor-depth重畳を行う場合は、画像変換のaspect ratio設定も一致させるか、
+双方を共通のカメラモデルへ再投影してください。各CameraInfoのheader stampは対応する
+画像のstampです。
+
+実行中に値を確認するには、次を使います。
+
+```bash
+ros2 topic echo /oak/color/camera_info sensor_msgs/msg/CameraInfo
+```
+
+ROS 2 Foxyでは連続表示されるため、確認後に`Ctrl-C`で終了します。
+
+CameraInfoは起動時にOAK-DのEEPROM校正値から作成されるため、publishのためにKalibrを
+実行する必要はありません。
+
 ## 診断topic
 
 | Topic | 主な内容 | 調査に使う場面 |
