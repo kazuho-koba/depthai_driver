@@ -1,4 +1,15 @@
 #!/usr/bin/env python3
+"""Publish OAK-D S2 VIO inputs, RGB-D images, and non-invasive diagnostics.
+
+Image and IMU topics are the stable OpenVINS interface. Per-device timestamps,
+sequences, exposure and USB identity are emitted separately as DiagnosticArray
+messages so a diagnostic feature never changes the VIO-facing ROS contract.
+
+``poll()`` drains non-blocking DepthAI queues, converts each packet to its ROS
+message, publishes the matching metadata with the same ROS header, and tracks
+sequence gaps per stream. The periodic device-info publisher makes identity and
+USB state available even if rosbag recording starts after the camera node.
+"""
 
 import rclpy
 from rclpy.node import Node
@@ -29,6 +40,9 @@ class OakdVioRgbdNode(Node):
 
         self.bridge = CvBridge()
 
+        # Stereo frames are paired by device sequence in poll(). Keep the two
+        # sides independent until both are present; pairing by host arrival
+        # order would hide one-sided USB/host scheduling delays.
         self.pending_left = {}
         self.pending_right = {}
         self.latest_color = None
