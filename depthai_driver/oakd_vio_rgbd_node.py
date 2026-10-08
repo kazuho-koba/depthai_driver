@@ -11,6 +11,7 @@ device-info publishにより、camera nodeより後にrosbag記録を始めて�
 """
 
 import rclpy
+import json
 from rclpy.node import Node
 from collections import defaultdict
 
@@ -20,7 +21,9 @@ from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 
 import depthai as dai
 from builtin_interfaces.msg import Time
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from std_msgs.msg import String
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+from depthai_driver.confidence_recording import configuration_dict, snapshot
 
 
 class OakdVioRgbdNode(Node):
@@ -58,6 +61,13 @@ class OakdVioRgbdNode(Node):
         self.declare_parameter("mono_fps", 20.0)
         self.declare_parameter("rgb_fps", 10.0)
         self.declare_parameter("imu_fps", 125.0)
+        # 既存depth処理は変更しない。追加診断だけをOFFにしてpayloadを抑制できる。
+        self.declare_parameter("publish_depth_confidence", True)
+        self.declare_parameter("confidence_threshold", 240)
+        self.publish_depth_confidence = bool(self.get_parameter("publish_depth_confidence").value)
+        confidence_threshold = int(self.get_parameter("confidence_threshold").value)
+        if not 0 <= confidence_threshold <= 255:
+            raise ValueError("confidence_threshold must be 0..255")
         self.declare_parameter("rgb_optical_frame", "rgb_camera_optical_frame")
         mono_fps = float(self.get_parameter("mono_fps").value)
         rgb_fps = float(self.get_parameter("rgb_fps").value)
@@ -139,7 +149,30 @@ class OakdVioRgbdNode(Node):
         stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_DENSITY)
         stereo.setDepthAlign(dai.CameraBoardSocket.RGB)
         stereo.setOutputSize(640, 400)
-        stereo.initialConfig.setConfidenceThreshold(240)
+        stereo.initialConfig.setConfidenceThreshold(confidence_threshold)
+        self.stereo = stereo
+        self.confidence_frames = {}
+        self.disparity_frames = {}
+        self.diagnostic_depth_headers = {}
+        if self.publish_depth_confidence:
+            self.pub_confidence = self.create_publisher(
+                Image, "/oak/stereo/confidence/image_raw", sensor_qos)
+            self.pub_disparity = self.create_publisher(
+                Image, "/oak/stereo/disparity/image_raw", sensor_qos)
+            self.pub_confidence_metadata = self.create_publisher(
+                DiagnosticArray, "/oak/diagnostics/confidence_frame", 50)
+            self.pub_disparity_metadata = self.create_publisher(
+                DiagnosticArray, "/oak/diagnostics/disparity_frame", 50)
+            snapshot_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                                     durability=DurabilityPolicy.TRANSIENT_LOCAL)
+            self.pub_stereo_snapshot = self.create_publisher(
+                String, "/oak/stereo/recording_snapshot", snapshot_qos)
+            for name, output in (("confidence", stereo.confidenceMap),
+                                 ("disparity", stereo.disparity),
+                                 ("stereo_config", stereo.outConfig)):
+                link = self.pipeline.createXLinkOut()
+                link.setStreamName(name)
+                output.link(link.input)
 
         mono_left.out.link(stereo.left)
         mono_right.out.link(stereo.right)
@@ -179,6 +212,19 @@ class OakdVioRgbdNode(Node):
         # -------------------------
         self.device = dai.Device(self.pipeline)
         self.mx_id = str(self.device.getMxId())
+        if self.publish_depth_confidence:
+            self.q_confidence = self.device.getOutputQueue("confidence", maxSize=20, blocking=False)
+            self.q_disparity = self.device.getOutputQueue("disparity", maxSize=20, blocking=False)
+            self.q_stereo_config = self.device.getOutputQueue("stereo_config", maxSize=5, blocking=False)
+            # 起動時の校正・pipeline・SDK設定を保存し、outConfig到着後には実出力設定も追記する。
+            self.stereo_snapshot = snapshot(self.device, self.pipeline, stereo, dai, {
+                "mono_fps": mono_fps, "rgb_fps": rgb_fps, "imu_fps": imu_fps,
+                "confidence_threshold": confidence_threshold, "publish_depth_confidence": True,
+            })
+            self.stereo_snapshot["out_config"] = None
+            self.snapshot_message = String(data=json.dumps(self.stereo_snapshot))
+            self.stereo_snapshot_timer = self.create_timer(5.0, self.publish_stereo_snapshot)
+            self.publish_stereo_snapshot()
         self.depth_camera_info = self.make_depth_camera_info()
         self.color_camera_info = self.make_color_camera_info()
         # ROS publisher遅延がOAK pipelineをblockしないようhost queueをnon-blockingにする。
@@ -424,6 +470,23 @@ class OakdVioRgbdNode(Node):
         ))
 
     def poll(self):
+        if self.publish_depth_confidence:
+            # 診断出力は既存depthと同じdevice sequenceだけpublishする。到着順の違いで
+            # depthのpublishを待たせず、小さな上限付きcacheで後着packetを照合する。
+            for queue, cache in ((self.q_confidence, self.confidence_frames),
+                                 (self.q_disparity, self.disparity_frames)):
+                for frame in queue.tryGetAll():
+                    cache[frame.getSequenceNum()] = frame
+                while len(cache) > 20:
+                    cache.pop(min(cache))
+            configs = self.q_stereo_config.tryGetAll()
+            # runtime設定入力は使っていないため、実効設定の初回だけJSON化する。
+            # 毎20Hzで同じ大きなsnapshotを生成・配信してCPU/payloadを増やさない。
+            if configs and self.stereo_snapshot["out_config"] is None:
+                self.stereo_snapshot["out_config"] = configuration_dict(configs[-1].get())
+                self.snapshot_message.data = json.dumps(self.stereo_snapshot)
+                self.publish_stereo_snapshot()
+            self.publish_depth_diagnostics()
         # -------------------------
         # Drain every host-queue item before publishing.  tryGet() alone takes
         # only one item per timer callback; with a small non-blocking queue,
@@ -611,9 +674,38 @@ class OakdVioRgbdNode(Node):
         self.pub_depth_metadata.publish(self.make_frame_metadata(
             self.latest_depth, "depth", depth_msg.header
         ))
+        if self.publish_depth_confidence:
+            self.diagnostic_depth_headers[self.latest_depth.getSequenceNum()] = depth_msg.header
+            while len(self.diagnostic_depth_headers) > 20:
+                self.diagnostic_depth_headers.pop(min(self.diagnostic_depth_headers))
+            self.publish_depth_diagnostics()
 
         self.latest_color = None
         self.latest_depth = None
+
+    def publish_stereo_snapshot(self):
+        """後から開始したmission recorderにも校正・設定が届くよう低頻度で再配信する。"""
+        self.pub_stereo_snapshot.publish(self.snapshot_message)
+
+    def publish_depth_diagnostics(self):
+        """depth採用sequenceと一致する2画像だけ出力する。片方欠落時には別frameを代用しない。"""
+        sequences = (set(self.diagnostic_depth_headers) & set(self.confidence_frames)
+                     & set(self.disparity_frames))
+        for sequence in sorted(sequences):
+            header = self.diagnostic_depth_headers.pop(sequence)
+            for cache, publisher, metadata_publisher, name in (
+                    (self.confidence_frames, self.pub_confidence, self.pub_confidence_metadata, "confidence"),
+                    (self.disparity_frames, self.pub_disparity, self.pub_disparity_metadata, "disparity")):
+                packet = cache.pop(sequence)
+                data = packet.getFrame()
+                encoding = "mono8" if data.dtype.itemsize == 1 else "16UC1"
+                message = self.bridge.cv2_to_imgmsg(data, encoding=encoding)
+                # 元depthのstampを厳密にコピー。元packetのdevice stampはmetadata側へ保持する。
+                message.header.stamp = header.stamp
+                message.header.frame_id = ("oak_stereo_right_rectified_optical_frame"
+                                           if name == "confidence" else self.rgb_optical_frame)
+                publisher.publish(message)
+                metadata_publisher.publish(self.make_frame_metadata(packet, name, message.header))
 
 
 def main(args=None):
