@@ -12,6 +12,7 @@ setup(
         ('share/' + package_name, [
             'package.xml',
             'README_diagnostics.md',
+            'README_patasmonkey.md',
         ]),
     ],
     install_requires=['setuptools'],
@@ -26,6 +27,7 @@ setup(
             'oakd_stereo_imu_node = depthai_driver.oakd_stereo_imu_node:main',
             'oakd_vio_rgbd_node = depthai_driver.oakd_vio_rgbd_node:main',
             'oakd_freq_test = depthai_driver.oakd_freq_test:main',
+            'oak_preview_node = depthai_driver.oak_preview_node:main',
         ],
     },
 )

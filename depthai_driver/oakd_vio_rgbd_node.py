@@ -12,7 +12,11 @@ device-info publishにより、camera nodeより後にrosbag記録を始めて�
 
 import rclpy
 import json
+import time
+import math
+from depthai_driver.publish_timing import TimingBuffer, TimedPublisher
 from rclpy.node import Node
+from rclpy.clock import Clock, ClockType
 from collections import defaultdict
 
 from sensor_msgs.msg import CameraInfo, Image, Imu
@@ -24,6 +28,7 @@ from builtin_interfaces.msg import Time
 from std_msgs.msg import String
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from depthai_driver.confidence_recording import configuration_dict, snapshot
+from depthai_driver.clock_mapping import ClockMapping, ClockMonitor, timedelta_ns
 
 
 class OakdVioRgbdNode(Node):
@@ -39,6 +44,32 @@ class OakdVioRgbdNode(Node):
         super().__init__("oakd_vio_rgbd_node")
 
         self.bridge = CvBridge()
+        # 現在時計の対応付けを既定にする。旧方式はパラメータ1つで復元できる。
+        # 同じmapperを全画像・IMUで共有し、ストリーム別の時計原点を作らない。
+        self.declare_parameter('timestamp_mode', 'host_clock')
+        self.clock_mapping = ClockMapping(
+            str(self.get_parameter('timestamp_mode').value),
+            lambda: self.get_clock().now().nanoseconds,
+            lambda: timedelta_ns(dai.Clock.now()))
+        # 既存device_info timer（5秒）で監視し、新しい高頻度callbackは増やさない。
+        # 5msは初期読み取り幅15µsより十分大きい暫定の警告値で、VO許容誤差ではない。
+        self.declare_parameter('clock_monitor_enabled', True)
+        self.declare_parameter('clock_warn_threshold_ms', 5.0)
+        self.declare_parameter('clock_max_reference_span_ms', 1.0)
+        threshold = float(self.get_parameter('clock_warn_threshold_ms').value)
+        max_span = float(self.get_parameter('clock_max_reference_span_ms').value)
+        if not all(math.isfinite(v) and v > 0 for v in (threshold, max_span)):
+            raise ValueError('時計監視のms閾値は正の有限値が必要です')
+        self.clock_monitor = (ClockMonitor(self.clock_mapping, round(threshold*1e6), round(max_span*1e6))
+                              if self.get_parameter('clock_monitor_enabled').value else None)
+        self.declare_parameter("timing_diagnostics", False)
+        self.declare_parameter("timing_csv", "/tmp/oak_publish_timing.csv")
+        # 診断ON時のみ保持。センサ設定やpublish周期は変更せず、試験時間に
+        # 合わせてpoll/publishの履歴容量を指定する（単位はmessageでなくsample）。
+        self.declare_parameter("timing_max_samples", 150000)
+        self.timing = (TimingBuffer(str(self.get_parameter("timing_csv").value),
+                                   int(self.get_parameter("timing_max_samples").value))
+                       if self.get_parameter("timing_diagnostics").value else None)
 
         # stereo frameはpoll()でdevice sequenceにより対にする。両側が揃うまで独立に保持し、
         # host到着順で組み合わせて片側のUSB/host scheduling遅延を隠さない。
@@ -245,9 +276,18 @@ class OakdVioRgbdNode(Node):
             "imu", maxSize=self.IMU_OUTPUT_QUEUE_SIZE, blocking=False
         )
 
+        if self.timing is not None:
+            # Nodeが所有する実publisherは保持し、呼出し側だけを計測proxyへ置き換える。
+            for name, publisher in list(vars(self).items()):
+                if name.startswith('pub_') and hasattr(publisher, 'publish'):
+                    setattr(self, name, TimedPublisher(publisher, self.timing))
         self.timer = self.create_timer(0.002, self.poll)
         # rosbagのtopic discoveryが遅れても記録されるようdevice identityを繰り返し出す。
-        self.device_info_timer = self.create_timer(5.0, self.publish_device_info)
+        # ROS時計が逆行しても監視を止めない。既存5秒診断を単調時計で駆動する。
+        # 同じexecutorが長時間停止した場合の監視遅延までは防げない。
+        self.device_info_clock = Clock(clock_type=ClockType.STEADY_TIME)
+        self.device_info_timer = self.create_timer(
+            5.0, self.publish_device_info, clock=self.device_info_clock)
         self.publish_device_info()
 
         self.get_logger().info(
@@ -415,28 +455,37 @@ class OakdVioRgbdNode(Node):
                 "usb_speed", self.read_device_value(self.device.getUsbSpeed)
             ),
             self.key_value("depthai_version", dai.__version__),
+            # bagに方式と実際の対応付けを残す。生device/host timestampは変更しない。
+            self.key_value('timestamp_mode', self.clock_mapping.mode),
+            self.key_value('ros_host_offset_ns', self.clock_mapping.offset_ns),
+            self.key_value('clock_reference_span_ns', self.clock_mapping.reference_span_ns),
         ]
+        status.values.append(self.key_value('clock_monitor_enabled', self.clock_monitor is not None))
+        if self.clock_monitor is not None:
+            # 観測差だけを記録し、Headerのオフセットは絶対に再代入しない。
+            # 過去の超過回数・最大差も保持し、復帰後に異常履歴を失わない。
+            clock_status = self.clock_monitor.check()
+            status.values.extend(self.key_value(key, value) for key, value in clock_status.items())
+            state = clock_status['clock_monitor_state']
+            if state == 'NOT_INITIALIZED':
+                status.level = DiagnosticStatus.STALE
+            elif state != 'OK':
+                status.level = DiagnosticStatus.WARN
+            status.message = state
         message.status = [status]
         self.pub_device_info.publish(message)
 
     def dai_time_to_ros_msg(self, dai_time):
-        """
-        Convert DepthAI timestamp(datetime.timedelta) to ROS builtin_interfaces/Time.
-        We align the first host-synchronized DepthAI timestamp to the ROS clock.
-        """
-        dai_sec = dai_time.total_seconds()
-
-        if not hasattr(self, "dai_to_ros_offset"):
-            ros_now = self.get_clock().now().nanoseconds * 1e-9
-            self.dai_to_ros_offset = ros_now - dai_sec
+        """取得時刻を共通ROS基準へ変換する。publish時刻への置換・丸めはしない。"""
+        initializing = self.clock_mapping.offset_ns is None
+        ros_ns = self.clock_mapping.convert(timedelta_ns(dai_time))
+        if initializing:
             self.get_logger().info(
-                f"DepthAI-to-ROS time offset initialized: {self.dai_to_ros_offset:.6f} sec"
+                'DepthAI-to-ROS clock mapping: mode={} offset_ns={} reference_span_ns={}'.format(
+                    self.clock_mapping.mode, self.clock_mapping.offset_ns,
+                    self.clock_mapping.reference_span_ns)
             )
-
-        ros_sec_float = dai_sec + self.dai_to_ros_offset
-        sec = int(ros_sec_float)
-        nanosec = int((ros_sec_float - sec) * 1e9)
-
+        sec, nanosec = divmod(ros_ns, 10**9)
         msg = Time()
         msg.sec = sec
         msg.nanosec = nanosec
@@ -470,6 +519,17 @@ class OakdVioRgbdNode(Node):
         ))
 
     def poll(self):
+        """診断ON時だけcallback全体を計測し、実処理は共通の_pollへ渡す。"""
+        if self.timing is None:
+            return self._poll()
+        start = time.perf_counter()
+        try:
+            return self._poll()
+        finally:
+            self.timing.add('poll', start, time.perf_counter()-start)
+
+    def _poll(self):
+        """各host queueを取得し、stereo全ペア・最新RGB-D・IMUを既存規約で配信する。"""
         if self.publish_depth_confidence:
             # 診断出力は既存depthと同じdevice sequenceだけpublishする。到着順の違いで
             # depthのpublishを待たせず、小さな上限付きcacheで後着packetを照合する。
@@ -499,6 +559,11 @@ class OakdVioRgbdNode(Node):
 
         color_frames = self.q_color.tryGetAll()
         depth_frames = self.q_depth.tryGetAll()
+        if self.timing is not None:
+            # これはhost取得batch内のlatest-only省略数で、device内部dropではない。
+            for name, frames in (('queue_color', color_frames), ('queue_depth', depth_frames)):
+                if frames:
+                    self.timing.add(name, time.perf_counter(), 0, len(frames), max(0, len(frames)-1))
         if color_frames:
             self.latest_color = color_frames[-1]
         if depth_frames:
@@ -714,8 +779,13 @@ def main(args=None):
     try:
         rclpy.spin(node)
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        try:
+            if node.timing is not None:
+                node.timing.save()
+        finally:
+            node.destroy_node()
+            if rclpy.ok():
+                rclpy.shutdown()
 
 
 if __name__ == "__main__":
